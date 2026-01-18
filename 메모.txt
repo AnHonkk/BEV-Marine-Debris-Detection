@@ -1,0 +1,32 @@
+BEV Fusion 기반 해양 부유 쓰레기 탐지
+
+1. 입력값
+- 카메라: 무인선 전방 카메라 1대
+    FOV
+    대각선 화각 (DFOV): 약 160° ~ 180° 
+    수평 화각 (HFOV): 약 130° ~ 150°
+    수직 화각 (VFOV): 약 90° ~ 110°
+
+- 라이다: 360도 포인트 클라우드(Ouster Lidar OS1-32)
+
+2. BEV 공간 상 특징맵 추출
+- 카메라: 
+    - 입력 이미지를 선 계산된 외부파라미터를 초기값으로 사용하는 딥러닝 기반 Vision Transform으로 BEV 공간 특징맵 생성
+    - 사전 캘리브레이션된 내부/외부 파라미터(K, T)를 초기값으로 설정
+    - Depth Network로 depth distribution 학습
+    - LSS(Lift-Splat-Shoot) 기반 geometric transformation으로 BEV 특징맵 생성
+    - 학습 과정에서 캘리브레이션 파라미터 미세 조정(refinement) 가능
+
+- 라이다
+    - 입력 포인트클라우드를 PointPillars로 BEV 공간 특징맵 생성
+
+3. BEV 공간상 Fusion
+    - 각 센서에서 생성한 특징맵을 Concat하고 딥러닝 기반 Encoder로 특징을 Fusion하여 BEV 공간 특징맵 생성
+    - FOV 기반 가중치 맵 생성:
+        * In-FOV (카메라 시야 내): 높은 가중치 (1.0)
+        * Near-FOV (시야 인접): 중간 가중치 (0.5)  
+        * Out-FOV (시야 외부): 낮은 가중치 (0.1)
+    - Weighted Fusion Encoder로 특징 통합
+
+4. Segmentation Map 생성
+    - Fusion된 특징맵을 딥러닝 기반 Decoder로 BEV 공간상 Segmentation Map 생성

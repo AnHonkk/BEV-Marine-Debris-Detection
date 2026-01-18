@@ -1,0 +1,68 @@
+# configs/camera_bev_config.yaml
+
+# ============================================
+# BEVFusion Camera Module Configuration
+# ConvNeXt Backbone
+# ============================================
+
+model:
+  # Backbone: ConvNeXt-Tiny (확정!)
+  backbone: 'convnext_tiny'
+  pretrained: true
+  feat_channels: 256
+  use_fpn: true
+  
+  depth:
+    bins: 64
+    range: [1.0, 50.0]  # 해양 환경
+    use_uncertainty: false
+  
+  bev:
+    size: [256, 256]
+    range: [-25.6, 25.6, -25.6, 25.6]  # 51.2m × 51.2m
+  
+  calibration:
+    learn_intrinsic: true
+    learn_extrinsic: true
+    max_delta_focal: 0.05
+    max_delta_pose: 0.05
+
+data:
+  img_size: [384, 640]  # H × W (유연하게 변경 가능)
+
+training:
+  batch_size: 4
+  lr: 1e-4
+  epochs: 100
+  
+  optimizer:
+    type: 'AdamW'
+    weight_decay: 0.05
+  
+  scheduler:
+    type: 'cosine'
+    warmup_epochs: 10
+  
+  phase_schedule:
+    phase1:
+      epochs: [0, 30]
+      freeze: ['calibration']
+      trainable: ['depth_net', 'backbone', 'fpn']
+      description: 'Depth와 Feature 학습'
+    
+    phase2:
+      epochs: [30, 70]
+      freeze: []
+      trainable: ['all']
+      description: '전체 학습'
+    
+    phase3:
+      epochs: [70, 100]
+      refine_calibration: true
+      lr: 1e-5
+      description: 'Calibration 미세 조정'
+
+hardware:
+  device: 'cuda'
+  mixed_precision: true
+  num_workers: 4
