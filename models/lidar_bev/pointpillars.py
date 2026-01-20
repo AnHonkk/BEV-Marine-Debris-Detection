@@ -256,7 +256,7 @@ class PointPillarsScatter(nn.Module):
         
         # Efficient scatter using advanced indexing
         # bev_features[batch_idx, :, x_idx, y_idx] = features
-        bev_features[batch_idx, :, x_idx, y_idx] = features.T
+        bev_features[batch_idx, :, x_idx, y_idx] = features
         
         return bev_features
 
