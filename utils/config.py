@@ -43,17 +43,17 @@ def get_model_config(backbone='convnext_tiny'):
 
 
 # Preset configs
-def get_convnext_tiny_config(img_size=(384, 640)):
+def get_convnext_tiny_config(img_size=(368, 640)):
     """ConvNeXt-Tiny preset config"""
     return {
         'backbone': 'convnext_tiny',
         'pretrained': True,
         'feat_channels': 256,
         'depth_bins': 64,
-        'depth_range': (1.0, 50.0),
+        'depth_range': (0.5, 20.0),
         'img_size': list(img_size),
-        'bev_size': [256, 256],
-        'bev_range': [-25.6, 25.6, -25.6, 25.6],
+        'bev_size': [400, 400],
+        'bev_range': [-20.0, 20.0, -20.0, 20.0],
         'K_init': np.array([
             [1000.0, 0, img_size[1]/2],
             [0, 1000.0, img_size[0]/2],

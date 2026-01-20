@@ -2,16 +2,15 @@
 
 from .camera_bev_module import CameraBEVModule
 from .camera_encoder import CameraBackbone, FPN
-from .depth_net import DepthNet, DepthNetWithContext
 from .calibration import LearnableCalibration
 from .view_transform import LSSViewTransform
+from .depth_net_unet import LightUNetDepthNet 
 
 __all__ = [
     'CameraBEVModule',
     'CameraBackbone',
     'FPN',
-    'DepthNet',
-    'DepthNetWithContext',
     'LearnableCalibration',
-    'LSSViewTransform'
+    'LSSViewTransform',
+    'LightUNetDepthNet'
 ]

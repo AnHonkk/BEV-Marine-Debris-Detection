@@ -6,7 +6,7 @@
 # ============================================
 
 model:
-  # Backbone: ConvNeXt-Tiny (확정!)
+  # Backbone: ConvNeXt-Tiny
   backbone: 'convnext_tiny'
   pretrained: true
   feat_channels: 256
@@ -14,12 +14,12 @@ model:
   
   depth:
     bins: 64
-    range: [1.0, 50.0]  # 해양 환경
+    range: [0.5, 20.0]  # 해양 환경
     use_uncertainty: false
   
   bev:
-    size: [256, 256]
-    range: [-25.6, 25.6, -25.6, 25.6]  # 51.2m × 51.2m
+    size: [400, 400]
+    range: [-20.0, 20.0, -20.0, 20.0]  # 51.2m × 51.2m
   
   calibration:
     learn_intrinsic: true

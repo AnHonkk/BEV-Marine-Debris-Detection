@@ -144,6 +144,7 @@ class CameraBEVModule(nn.Module):
             'bev_features': bev_features,
             'depth_probs': depth_outputs['depth_probs'],
             'depth_expected': depth_outputs['depth_expected'],
+            'depth_values': depth_outputs['depth_values'],
             'K': K,
             'T': T,
             'img_features': img_features  # For visualization or auxiliary tasks
