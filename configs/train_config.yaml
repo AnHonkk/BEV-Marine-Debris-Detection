@@ -1,0 +1,89 @@
+# BEV Fusion Network Configuration
+# 해양 부유쓰레기 탐지를 위한 설정
+
+# Model configuration
+model:
+  type: 'fusion'  # 'fusion', 'lidar_only', 'camera_only'
+  
+  # Camera BEV settings
+  camera_bev_channels: 256
+  camera_bev_size: [200, 200]
+  
+  # LiDAR BEV settings
+  lidar_bev_channels: 256
+  point_cloud_range: [-30.0, -30.0, -2.0, 30.0, 30.0, 3.0]
+  voxel_size: [0.3, 0.3, 5.0]
+  max_points_per_voxel: 32
+  max_num_voxels: 40000
+  
+  # Fusion settings
+  fusion_method: 'adaptive'  # 'conv', 'channel_attn', 'spatial_attn', 'cross_attn', 'adaptive'
+  fused_channels: 256
+  
+  # Segmentation settings
+  num_classes: 6
+  use_instance_head: false
+  use_boundary_head: true
+  
+  # Final BEV size
+  bev_size: [200, 200]
+
+# Loss configuration
+loss:
+  # Class weights for imbalanced data
+  # [Background, Plastic, Wood, Styrofoam, Rope/Net, Other]
+  class_weights: [0.5, 2.0, 1.5, 2.0, 1.5, 1.0]
+  
+  # Loss weights
+  semantic_weight: 1.0
+  dice_weight: 1.0
+  boundary_weight: 0.5
+  center_weight: 1.0
+  offset_weight: 0.2
+  size_weight: 0.1
+  
+  # Focal loss
+  focal_gamma: 2.0
+  
+  # Instance loss
+  use_instance_loss: false
+
+# Optimizer configuration
+optimizer:
+  type: 'AdamW'
+  lr: 0.0001
+  weight_decay: 0.01
+
+# Learning rate scheduler
+scheduler:
+  type: 'CosineAnnealing'  # 'CosineAnnealing', 'StepLR', 'OneCycleLR', 'none'
+  T_max: 100
+  eta_min: 0.000001
+
+# Training settings
+num_epochs: 100
+batch_size: 4
+num_workers: 4
+max_grad_norm: 1.0
+
+# Logging and saving
+save_interval: 10
+val_interval: 1
+log_interval: 10
+output_dir: './outputs'
+
+# Data settings
+data:
+  train_path: './data/train'
+  val_path: './data/val'
+  test_path: './data/test'
+  
+  # Augmentation
+  augmentation:
+    random_flip: true
+    random_rotate: true
+    random_scale: [0.9, 1.1]
+
+# Hardware settings
+device: 'cuda'
+mixed_precision: true  # Use AMP for faster training
