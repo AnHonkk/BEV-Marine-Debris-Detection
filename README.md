@@ -209,7 +209,6 @@ python tests/test_modules.py
 
 ## TODO
 
-- [ ] Camera BEV Encoder 통합
 - [ ] 실제 데이터셋 연동
 - [ ] Data augmentation 구현
 - [ ] Inference 스크립트
