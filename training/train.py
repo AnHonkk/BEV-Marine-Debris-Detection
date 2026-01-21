@@ -1,58 +1,28 @@
-"""
-Training Script for BEV Fusion Network
-해양 부유쓰레기 탐지 네트워크 학습
-"""
-
-import os
 import sys
-import argparse
-import yaml
-import logging
-from datetime import datetime
-from typing import Dict, Optional
+import os
+
+# 경로 추가 (가장 먼저 실행되어야 함)
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
+import yaml
+import argparse
+from tqdm import tqdm
+from typing import Dict, Optional
+import time
+import logging
 
-# Add parent directory to path
-sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-
-from models import BEVFusionNetwork, build_network
+# 모듈 임포트
+from models import build_network
+from training.dataset import MarineDebrisDataset, custom_collate_fn
 from training.losses import MultiTaskLoss
-
-
-def setup_logging(log_dir: str) -> logging.Logger:
-    """Setup logging"""
-    os.makedirs(log_dir, exist_ok=True)
-    
-    logger = logging.getLogger('BEVFusion')
-    logger.setLevel(logging.INFO)
-    
-    # File handler
-    fh = logging.FileHandler(os.path.join(log_dir, 'train.log'))
-    fh.setLevel(logging.INFO)
-    
-    # Console handler
-    ch = logging.StreamHandler()
-    ch.setLevel(logging.INFO)
-    
-    # Formatter
-    formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-    fh.setFormatter(formatter)
-    ch.setFormatter(formatter)
-    
-    logger.addHandler(fh)
-    logger.addHandler(ch)
-    
-    return logger
-
+from utils.logger import setup_logging
 
 class Trainer:
-    """Training class for BEV Fusion Network"""
-    
     def __init__(
         self,
         config: Dict,
@@ -74,13 +44,22 @@ class Trainer:
         # Loss function
         loss_config = config.get('loss', {})
         self.criterion = MultiTaskLoss(
-            num_classes=config.get('num_classes', 6),
+            num_classes=config.get('model', {}).get('num_classes', 3),
             class_weights=loss_config.get('class_weights'),
             semantic_weight=loss_config.get('semantic_weight', 1.0),
             dice_weight=loss_config.get('dice_weight', 1.0),
             boundary_weight=loss_config.get('boundary_weight', 0.5),
             use_instance_loss=loss_config.get('use_instance_loss', False),
         )
+        
+        # [수정] 손실 함수(와 그 내부의 가중치)를 GPU로 이동
+        self.criterion = self.criterion.to(self.device)
+
+        # Training settings
+        self.num_epochs = config.get('num_epochs', 100)
+        self.save_interval = config.get('save_interval', 10)
+        self.val_interval = config.get('val_interval', 1)
+        self.log_interval = config.get('log_interval', 10)
         
         # Optimizer
         opt_config = config.get('optimizer', {})
@@ -89,12 +68,6 @@ class Trainer:
         # Scheduler
         sched_config = config.get('scheduler', {})
         self.scheduler = self._build_scheduler(sched_config)
-        
-        # Training settings
-        self.num_epochs = config.get('num_epochs', 100)
-        self.save_interval = config.get('save_interval', 10)
-        self.val_interval = config.get('val_interval', 1)
-        self.log_interval = config.get('log_interval', 10)
         
         # Directories
         self.output_dir = config.get('output_dir', './outputs')
@@ -106,313 +79,221 @@ class Trainer:
         
         # Logger
         self.logger = setup_logging(self.log_dir)
-        
-        # TensorBoard
         self.writer = SummaryWriter(self.log_dir)
         
-        # Training state
         self.current_epoch = 0
         self.global_step = 0
         self.best_val_miou = 0.0
         
-    def _build_optimizer(self, config: Dict) -> optim.Optimizer:
-        """Build optimizer"""
-        opt_type = config.get('type', 'AdamW')
-        lr = config.get('lr', 1e-4)
+    def _build_optimizer(self, config):
+        lr = config.get('lr', 0.0001)
         weight_decay = config.get('weight_decay', 0.01)
-        
-        if opt_type == 'AdamW':
-            return optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        elif opt_type == 'SGD':
-            momentum = config.get('momentum', 0.9)
-            return optim.SGD(self.model.parameters(), lr=lr, momentum=momentum, weight_decay=weight_decay)
-        elif opt_type == 'Adam':
-            return optim.Adam(self.model.parameters(), lr=lr, weight_decay=weight_decay)
-        else:
-            raise ValueError(f"Unknown optimizer: {opt_type}")
+        return optim.AdamW(self.model.parameters(), lr=lr, weight_decay=weight_decay)
     
-    def _build_scheduler(self, config: Dict) -> Optional[optim.lr_scheduler._LRScheduler]:
-        """Build learning rate scheduler"""
-        sched_type = config.get('type', 'CosineAnnealing')
-        
-        if sched_type == 'CosineAnnealing':
-            T_max = config.get('T_max', self.num_epochs)
-            eta_min = config.get('eta_min', 1e-6)
-            return optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=T_max, eta_min=eta_min)
-        elif sched_type == 'StepLR':
-            step_size = config.get('step_size', 30)
-            gamma = config.get('gamma', 0.1)
-            return optim.lr_scheduler.StepLR(self.optimizer, step_size=step_size, gamma=gamma)
-        elif sched_type == 'OneCycleLR':
-            max_lr = config.get('max_lr', self.config.get('optimizer', {}).get('lr', 1e-4))
-            total_steps = len(self.train_loader) * self.num_epochs
-            return optim.lr_scheduler.OneCycleLR(self.optimizer, max_lr=max_lr, total_steps=total_steps)
-        elif sched_type == 'none':
-            return None
-        else:
-            raise ValueError(f"Unknown scheduler: {sched_type}")
-    
-    def train_epoch(self) -> Dict[str, float]:
-        """Train for one epoch"""
+    def _build_scheduler(self, config):
+        T_max = config.get('T_max', self.num_epochs)
+        eta_min = float(config.get('eta_min', 1e-6))
+        return optim.lr_scheduler.CosineAnnealingLR(
+            self.optimizer, T_max=T_max, eta_min=eta_min
+        )
+
+    def train_epoch(self):
         self.model.train()
-        epoch_losses = {}
-        num_batches = len(self.train_loader)
+        total_loss = 0
         
-        for batch_idx, batch in enumerate(self.train_loader):
-            # Move data to device
-            camera_bev = batch['camera_bev'].to(self.device)
-            points = batch['points'].to(self.device)
-            targets = {k: v.to(self.device) for k, v in batch['targets'].items()}
-            batch_size = camera_bev.shape[0]
-            
-            # Forward pass
-            outputs = self.model(camera_bev, points, batch_size)
-            
-            # Compute loss
-            losses = self.criterion(outputs, targets)
-            
-            # Backward pass
+        pbar = tqdm(self.train_loader, desc=f"Epoch {self.current_epoch+1}/{self.num_epochs}")
+        
+        for batch_idx, batch in enumerate(pbar):
             self.optimizer.zero_grad()
-            losses['total'].backward()
             
-            # Gradient clipping
-            max_grad_norm = self.config.get('max_grad_norm', 1.0)
-            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_grad_norm)
+            # Targets 이동
+            targets_dict = {k: v.to(self.device) for k, v in batch['targets'].items()}
             
+            points = batch['points'].to(self.device)
+            batch_size = len(targets_dict['semantic'])
+            
+            # 입력 데이터 처리
+            if 'images' in batch:
+                images = batch['images'].to(self.device)
+                outputs = self.model(images, points, batch_size)
+            elif 'camera_bev' in batch:
+                camera_bev = batch['camera_bev'].to(self.device)
+                outputs = self.model(camera_bev, points, batch_size)
+            else:
+                bev_h, bev_w = self.config['model'].get('camera_bev_size', (200, 200))
+                dummy_bev = torch.zeros((batch_size, 256, bev_h, bev_w)).to(self.device)
+                outputs = self.model(dummy_bev, points, batch_size)
+
+            # Loss 계산
+            loss, loss_dict = self.criterion(outputs, targets_dict)
+            
+            loss.backward()
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
             self.optimizer.step()
             
-            # Update scheduler if OneCycleLR
-            if isinstance(self.scheduler, optim.lr_scheduler.OneCycleLR):
-                self.scheduler.step()
-            
-            # Accumulate losses
-            for k, v in losses.items():
-                if k not in epoch_losses:
-                    epoch_losses[k] = 0.0
-                epoch_losses[k] += v.item()
+            total_loss += loss.item()
+            self.global_step += 1
             
             # Logging
             if batch_idx % self.log_interval == 0:
-                self.logger.info(
-                    f"Epoch [{self.current_epoch}/{self.num_epochs}] "
-                    f"Batch [{batch_idx}/{num_batches}] "
-                    f"Loss: {losses['total'].item():.4f}"
-                )
+                self.writer.add_scalar('Train/Loss', loss.item(), self.global_step)
+                for k, v in loss_dict.items():
+                    if isinstance(v, torch.Tensor):
+                        self.writer.add_scalar(f'Train/{k}', v.item(), self.global_step)
+                    else:
+                        self.writer.add_scalar(f'Train/{k}', v, self.global_step)
+                
+            pbar.set_postfix({'loss': f"{loss.item():.4f}"})
             
-            # TensorBoard logging
-            self.writer.add_scalar('train/loss', losses['total'].item(), self.global_step)
-            for k, v in losses.items():
-                if k != 'total':
-                    self.writer.add_scalar(f'train/loss_{k}', v.item(), self.global_step)
+        if self.scheduler:
+            self.scheduler.step()
             
-            self.global_step += 1
-        
-        # Average losses
-        for k in epoch_losses:
-            epoch_losses[k] /= num_batches
-        
-        return epoch_losses
-    
-    @torch.no_grad()
-    def validate(self) -> Dict[str, float]:
-        """Validate model"""
-        if self.val_loader is None:
-            return {}
-        
+        return total_loss / len(self.train_loader)
+
+    def validate(self):
         self.model.eval()
-        val_losses = {}
-        num_batches = len(self.val_loader)
+        total_loss = 0
+        total_intersection = 0
+        total_union = 0
         
-        # Metrics
-        total_correct = 0
-        total_pixels = 0
-        intersection = torch.zeros(self.config.get('num_classes', 6), device=self.device)
-        union = torch.zeros(self.config.get('num_classes', 6), device=self.device)
+        with torch.no_grad():
+            for batch in tqdm(self.val_loader, desc="Validating"):
+                targets_dict = {k: v.to(self.device) for k, v in batch['targets'].items()}
+                points = batch['points'].to(self.device)
+                batch_size = len(targets_dict['semantic'])
+                
+                if 'images' in batch:
+                    images = batch['images'].to(self.device)
+                    outputs = self.model(images, points, batch_size)
+                elif 'camera_bev' in batch:
+                    camera_bev = batch['camera_bev'].to(self.device)
+                    outputs = self.model(camera_bev, points, batch_size)
+                else:
+                    bev_h, bev_w = self.config['model'].get('camera_bev_size', (200, 200))
+                    dummy_bev = torch.zeros((batch_size, 256, bev_h, bev_w)).to(self.device)
+                    outputs = self.model(dummy_bev, points, batch_size)
+                
+                loss, _ = self.criterion(outputs, targets_dict)
+                total_loss += loss.item()
+                
+                # mIoU calculation
+                pred = outputs['semantic'].argmax(dim=1)
+                targets = targets_dict['semantic']
+                
+                num_classes = self.criterion.num_classes
+                for cls in range(num_classes):
+                    pred_mask = (pred == cls)
+                    target_mask = (targets == cls)
+                    intersection = (pred_mask & target_mask).sum().item()
+                    union = (pred_mask | target_mask).sum().item()
+                    
+                    if union > 0:
+                        total_intersection += intersection
+                        total_union += union
+                        
+        miou = total_intersection / (total_union + 1e-6)
+        return total_loss / len(self.val_loader), miou
+
+    def train(self):
+        self.logger.info("Starting training...")
+        self.logger.info(f"Config: {self.config}")
         
-        for batch_idx, batch in enumerate(self.val_loader):
-            camera_bev = batch['camera_bev'].to(self.device)
-            points = batch['points'].to(self.device)
-            targets = {k: v.to(self.device) for k, v in batch['targets'].items()}
-            batch_size = camera_bev.shape[0]
+        for epoch in range(self.num_epochs):
+            self.current_epoch = epoch
             
-            # Forward pass
-            outputs = self.model(camera_bev, points, batch_size)
+            train_loss = self.train_epoch()
+            val_loss, val_miou = self.validate()
             
-            # Compute loss
-            losses = self.criterion(outputs, targets)
+            self.logger.info(f"Epoch {epoch+1}/{self.num_epochs} - Train Loss: {train_loss:.4f}, Val Loss: {val_loss:.4f}, Val mIoU: {val_miou:.4f}")
+            self.writer.add_scalar('Val/Loss', val_loss, epoch)
+            self.writer.add_scalar('Val/mIoU', val_miou, epoch)
             
-            # Accumulate losses
-            for k, v in losses.items():
-                if k not in val_losses:
-                    val_losses[k] = 0.0
-                val_losses[k] += v.item()
-            
-            # Compute metrics
-            pred = outputs['semantic'].argmax(dim=1)
-            target = targets['semantic']
-            
-            # Accuracy
-            total_correct += (pred == target).sum().item()
-            total_pixels += target.numel()
-            
-            # IoU
-            for c in range(self.config.get('num_classes', 6)):
-                pred_c = (pred == c)
-                target_c = (target == c)
-                intersection[c] += (pred_c & target_c).sum()
-                union[c] += (pred_c | target_c).sum()
-        
-        # Average losses
-        for k in val_losses:
-            val_losses[k] /= num_batches
-        
-        # Compute metrics
-        accuracy = total_correct / total_pixels
-        iou = intersection / (union + 1e-6)
-        miou = iou.mean().item()
-        
-        val_losses['accuracy'] = accuracy
-        val_losses['miou'] = miou
-        
-        # TensorBoard logging
-        self.writer.add_scalar('val/loss', val_losses['total'], self.current_epoch)
-        self.writer.add_scalar('val/accuracy', accuracy, self.current_epoch)
-        self.writer.add_scalar('val/miou', miou, self.current_epoch)
-        
-        return val_losses
-    
-    def save_checkpoint(self, filename: str, is_best: bool = False):
-        """Save checkpoint"""
-        checkpoint = {
+            if (epoch + 1) % self.save_interval == 0:
+                self.save_checkpoint(f'checkpoint_epoch_{epoch+1}.pth')
+                
+            if val_miou > self.best_val_miou:
+                self.best_val_miou = val_miou
+                self.save_checkpoint('best_model.pth')
+                self.logger.info(f"New best model saved with mIoU: {val_miou:.4f}")
+
+    def save_checkpoint(self, filename):
+        path = os.path.join(self.checkpoint_dir, filename)
+        torch.save({
             'epoch': self.current_epoch,
-            'global_step': self.global_step,
             'model_state_dict': self.model.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict(),
             'best_val_miou': self.best_val_miou,
             'config': self.config,
-        }
-        
-        if self.scheduler is not None:
-            checkpoint['scheduler_state_dict'] = self.scheduler.state_dict()
-        
-        path = os.path.join(self.checkpoint_dir, filename)
-        torch.save(checkpoint, path)
-        self.logger.info(f"Checkpoint saved to {path}")
-        
-        if is_best:
-            best_path = os.path.join(self.checkpoint_dir, 'best.pth')
-            torch.save(checkpoint, best_path)
-            self.logger.info(f"Best model saved to {best_path}")
-    
-    def load_checkpoint(self, path: str):
-        """Load checkpoint"""
-        checkpoint = torch.load(path, map_location=self.device)
-        
+        }, path)
+
+    def load_checkpoint(self, path):
+        checkpoint = torch.load(path)
         self.model.load_state_dict(checkpoint['model_state_dict'])
         self.optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
         self.current_epoch = checkpoint['epoch']
-        self.global_step = checkpoint['global_step']
-        self.best_val_miou = checkpoint.get('best_val_miou', 0.0)
-        
-        if self.scheduler is not None and 'scheduler_state_dict' in checkpoint:
-            self.scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
-        
-        self.logger.info(f"Checkpoint loaded from {path}")
-    
-    def train(self):
-        """Full training loop"""
-        self.logger.info("Starting training...")
-        self.logger.info(f"Config: {self.config}")
-        
-        for epoch in range(self.current_epoch, self.num_epochs):
-            self.current_epoch = epoch
-            
-            # Train
-            train_losses = self.train_epoch()
-            self.logger.info(
-                f"Epoch [{epoch}/{self.num_epochs}] "
-                f"Train Loss: {train_losses['total']:.4f}"
-            )
-            
-            # Update scheduler (except OneCycleLR)
-            if self.scheduler is not None and not isinstance(self.scheduler, optim.lr_scheduler.OneCycleLR):
-                self.scheduler.step()
-            
-            # Validate
-            if self.val_loader is not None and epoch % self.val_interval == 0:
-                val_losses = self.validate()
-                self.logger.info(
-                    f"Epoch [{epoch}/{self.num_epochs}] "
-                    f"Val Loss: {val_losses['total']:.4f} "
-                    f"mIoU: {val_losses['miou']:.4f}"
-                )
-                
-                # Save best model
-                if val_losses['miou'] > self.best_val_miou:
-                    self.best_val_miou = val_losses['miou']
-                    self.save_checkpoint('best.pth', is_best=True)
-            
-            # Save checkpoint
-            if epoch % self.save_interval == 0:
-                self.save_checkpoint(f'epoch_{epoch}.pth')
-        
-        # Save final model
-        self.save_checkpoint('final.pth')
-        self.logger.info("Training completed!")
-        
-        self.writer.close()
-
+        self.best_val_miou = checkpoint['best_val_miou']
+        self.logger.info(f"Loaded checkpoint from {path}")
 
 def main():
-    parser = argparse.ArgumentParser(description='Train BEV Fusion Network')
+    parser = argparse.ArgumentParser()
     parser.add_argument('--config', type=str, required=True, help='Path to config file')
-    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume from')
-    parser.add_argument('--device', type=str, default='cuda', help='Device to use')
+    parser.add_argument('--resume', type=str, default=None, help='Path to checkpoint to resume')
+    parser.add_argument('--device', type=str, default='cuda', help='Device (cuda/cpu)')
     args = parser.parse_args()
     
-    # Load config
     with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
+        
+    model = build_network(config)
     
-    # Build model
-    model = build_network(config.get('model', {}))
+    print("Loading datasets...")
+    data_cfg = config.get('data', {})
+    model_cfg = config.get('model', {})
     
-    # Create dummy data loaders for demonstration
-    # In practice, replace with actual data loaders
-    from torch.utils.data import TensorDataset
+    train_dataset = MarineDebrisDataset(
+        info_path=data_cfg['train_path'],
+        bev_size=tuple(model_cfg.get('bev_size', [200, 200])),
+        point_cloud_range=model_cfg['point_cloud_range'],
+        training=True
+    )
     
-    # Dummy data
-    B, C, H, W = 2, 256, 200, 200
-    num_points = 10000
-    num_classes = config.get('model', {}).get('num_classes', 6)
+    val_dataset = MarineDebrisDataset(
+        info_path=data_cfg['val_path'],
+        bev_size=tuple(model_cfg.get('bev_size', [200, 200])),
+        point_cloud_range=model_cfg['point_cloud_range'],
+        training=False
+    )
     
-    # Create dummy dataset
-    camera_bev = torch.randn(10, C, H, W)
-    points = torch.randn(10, num_points, 5)  # (batch_idx, x, y, z, intensity)
-    semantic_targets = torch.randint(0, num_classes, (10, H, W))
-    boundary_targets = torch.randint(0, 2, (10, H, W)).float()
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=config['training'].get('batch_size', 4),
+        shuffle=True,
+        num_workers=4,
+        collate_fn=custom_collate_fn
+    )
     
-    # Note: This is a simplified example. Real implementation needs proper data loading
-    print("Note: Using dummy data for demonstration. Replace with actual data loaders.")
+    val_loader = DataLoader(
+        val_dataset,
+        batch_size=config['training'].get('batch_size', 4),
+        shuffle=False,
+        num_workers=4,
+        collate_fn=custom_collate_fn
+    )
     
-    # Create trainer
-    # trainer = Trainer(
-    #     config=config,
-    #     model=model,
-    #     train_loader=train_loader,
-    #     val_loader=val_loader,
-    #     device=args.device,
-    # )
+    print(f"Train samples: {len(train_dataset)}, Val samples: {len(val_dataset)}")
     
-    # Resume from checkpoint if provided
-    # if args.resume:
-    #     trainer.load_checkpoint(args.resume)
+    trainer = Trainer(
+        config=config,
+        model=model,
+        train_loader=train_loader,
+        val_loader=val_loader,
+        device=args.device,
+    )
     
-    # Start training
-    # trainer.train()
+    if args.resume:
+        trainer.load_checkpoint(args.resume)
     
-    print("Training script ready. Provide actual data loaders to start training.")
-
+    trainer.train()
 
 if __name__ == '__main__':
     main()

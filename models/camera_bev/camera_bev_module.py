@@ -4,7 +4,7 @@ import torch
 import torch.nn as nn
 from typing import Dict
 from .camera_encoder import CameraBackbone
-from .depth_net_unet import LightUNetDepthNet  # ← Light U-Net! ⭐
+from .depth_net_unet import LightUNetDepthNet
 from .calibration import LearnableCalibration
 from .view_transform import LSSViewTransform
 

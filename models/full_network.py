@@ -1,76 +1,62 @@
 """
-BEV Fusion Network for Marine Debris Detection (400x400 출력)
-해양 부유쓰레기 탐지를 위한 통합 BEV Fusion 네트워크
-
-Architecture:
-1. Camera Branch: Image → Camera BEV Feature Map (400x400)
-2. LiDAR Branch: Point Cloud → LiDAR BEV Feature Map (400x400)
-3. Fusion: Camera BEV + LiDAR BEV → Fused BEV Feature Map (400x400)
-4. Segmentation Head: Fused BEV → BEV Segmentation Map (400x400)
-
-Classes (3):
-- 0: Background (배경/수면)
-- 1: Land (육지/부두/구조물)
-- 2: Debris (부유쓰레기)
+BEV Fusion Network
+- Camera Module: User's CameraBEVModule
+- LiDAR Module: PointPillars
+- Fusion: Adaptive Fusion
+- Head: Segmentation Head
 """
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from typing import Dict, List, Tuple, Optional, Any
+from typing import Dict, List, Tuple, Optional
+import os
+import numpy as np  # [수정] numpy 임포트 추가
 
 from .lidar_bev import LiDARBEVEncoder, MarineLiDARBEVEncoder
-from .fusion import BEVFusion, MultiScaleBEVFusion
-from .segmentation_head import MarineDebrisSegHead, BEVSegmentationHead
+from .fusion import BEVFusion
+from .segmentation_head import MarineDebrisSegHead
 
+# 사용자님의 모듈(CameraBEVModule) 임포트
+try:
+    from .camera_bev.camera_bev_module import CameraBEVModule
+except ImportError:
+    print("Warning: CameraBEVModule not found. Camera branch will fail.")
+    pass
 
 class BEVFusionNetwork(nn.Module):
-    """
-    완전한 BEV Fusion 네트워크 (400x400 출력)
-    Camera와 LiDAR 센서 데이터를 BEV 공간에서 융합하여 Segmentation 수행
-    """
+    """LiDAR-only 모드"""
     def __init__(
         self,
-        # Camera BEV 설정
         camera_bev_channels: int = 256,
-        camera_bev_size: Tuple[int, int] = (400, 400),
-        # LiDAR BEV 설정
+        camera_bev_size: Tuple[int, int] = (200, 200),
         lidar_config: Optional[Dict] = None,
         lidar_bev_channels: int = 256,
-        # Fusion 설정
         fusion_method: str = 'adaptive',
         fused_channels: int = 256,
-        # Segmentation 설정 (3 classes)
         num_classes: int = 3,
         use_instance_head: bool = False,
         use_boundary_head: bool = True,
-        # BEV grid 설정 (400x400, 0.1m resolution)
-        bev_size: Tuple[int, int] = (400, 400),
+        output_stride: int = 1,
+        bev_size: Tuple[int, int] = (200, 200),
         point_cloud_range: List[float] = [-20.0, -20.0, -2.0, 20.0, 20.0, 3.0],
-        voxel_size: Tuple[float, float, float] = (0.1, 0.1, 5.0),
+        voxel_size: Tuple[float, float, float] = (0.2, 0.2, 5.0),
     ):
         super().__init__()
-        
-        self.camera_bev_channels = camera_bev_channels
-        self.lidar_bev_channels = lidar_bev_channels
-        self.fused_channels = fused_channels
-        self.num_classes = num_classes
         self.bev_size = bev_size
-        self.point_cloud_range = point_cloud_range
         
-        # LiDAR BEV Encoder (400x400, 0.1m resolution)
+        # LiDAR BEV Encoder
         if lidar_config is None:
             lidar_config = {
                 'point_cloud_range': point_cloud_range,
                 'voxel_size': voxel_size,
                 'max_points_per_voxel': 32,
-                'max_num_voxels': 60000,
+                'max_num_voxels': 25000,
                 'backbone_out_channels': lidar_bev_channels,
             }
         
         self.lidar_encoder = MarineLiDARBEVEncoder(**lidar_config)
         
-        # BEV Fusion (400x400)
+        # BEV Fusion
         self.fusion = BEVFusion(
             camera_channels=camera_bev_channels,
             lidar_channels=lidar_bev_channels,
@@ -79,247 +65,177 @@ class BEVFusionNetwork(nn.Module):
             target_shape=bev_size,
         )
         
-        # Segmentation Head (3 classes)
+        # Segmentation Head
         self.seg_head = MarineDebrisSegHead(
             in_channels=fused_channels,
             num_classes=num_classes,
             hidden_channels=fused_channels,
             use_instance_head=use_instance_head,
             use_boundary_head=use_boundary_head,
+            output_stride=output_stride
         )
         
-    def forward(
-        self,
-        camera_bev: torch.Tensor,
-        points: torch.Tensor,
-        batch_size: int,
-    ) -> Dict[str, torch.Tensor]:
-        """
-        Forward pass
-        
-        Args:
-            camera_bev: Camera BEV features (B, 256, 400, 400)
-            points: LiDAR points (N, 5) - (batch_idx, x, y, z, intensity)
-            batch_size: Batch size
-            
-        Returns:
-            Dict containing:
-                - semantic: Semantic segmentation (B, 3, 400, 400)
-                - boundary: Boundary prediction (B, 1, 400, 400)
-                - size: Size estimation (B, 1, 400, 400)
-        """
-        # LiDAR BEV encoding (400x400)
+    def forward(self, camera_bev, points, batch_size):
         lidar_bev = self.lidar_encoder(points, batch_size)
-        
-        # Fusion (400x400)
-        fused_bev = self.fusion(camera_bev, lidar_bev)
-        
-        # Segmentation (400x400)
-        outputs = self.seg_head(fused_bev)
-        
-        # Add intermediate features
-        outputs['camera_bev'] = camera_bev
-        outputs['lidar_bev'] = lidar_bev
-        outputs['fused_bev'] = fused_bev
-        
-        return outputs
-    
-    def forward_with_voxels(
-        self,
-        camera_bev: torch.Tensor,
-        voxels: torch.Tensor,
-        num_points: torch.Tensor,
-        coors: torch.Tensor,
-        batch_size: int,
-    ) -> Dict[str, torch.Tensor]:
-        """미리 voxelize된 LiDAR 데이터로 forward"""
-        lidar_bev = self.lidar_encoder.forward_with_voxels(
-            voxels, num_points, coors, batch_size
-        )
-        
         fused_bev = self.fusion(camera_bev, lidar_bev)
         outputs = self.seg_head(fused_bev)
-        
-        outputs['camera_bev'] = camera_bev
-        outputs['lidar_bev'] = lidar_bev
-        outputs['fused_bev'] = fused_bev
-        
         return outputs
-    
-    def get_seg_map(self, outputs: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Get final segmentation map (400x400)"""
-        return self.seg_head.get_seg_map(outputs)
-
 
 class FullBEVFusionNetwork(nn.Module):
-    """
-    Camera Encoder를 포함한 완전한 End-to-End 네트워크 (400x400)
-    Image + Point Cloud → BEV Segmentation Map
-    """
+    """Camera Image + LiDAR Point Cloud -> Fusion (End-to-End)"""
     def __init__(
         self,
-        camera_encoder: Optional[nn.Module] = None,
-        camera_encoder_config: Optional[Dict] = None,
-        lidar_config: Optional[Dict] = None,
+        camera_config: Dict,
+        lidar_config: Dict,
         fusion_method: str = 'adaptive',
         fused_channels: int = 256,
         num_classes: int = 3,
-        bev_size: Tuple[int, int] = (400, 400),
-        point_cloud_range: List[float] = [-20.0, -20.0, -2.0, 20.0, 20.0, 3.0],
+        use_instance_head: bool = False,
+        use_boundary_head: bool = True,
+        output_stride: int = 1,
+        bev_size: Tuple[int, int] = (200, 200),
     ):
         super().__init__()
         
-        self.bev_size = bev_size
-        self.point_cloud_range = point_cloud_range
-        self.num_classes = num_classes
+        # Camera Module
+        self.camera_encoder = CameraBEVModule(camera_config)
         
-        # Camera Encoder
-        if camera_encoder is not None:
-            self.camera_encoder = camera_encoder
-            camera_bev_channels = getattr(camera_encoder, 'out_channels', 256)
-        else:
-            self.camera_encoder = None
-            camera_bev_channels = camera_encoder_config.get('out_channels', 256) if camera_encoder_config else 256
+        # LiDAR Encoder
+        self.lidar_encoder = MarineLiDARBEVEncoder(**lidar_config)
         
-        # LiDAR Encoder (400x400, 0.1m resolution)
-        default_lidar_config = {
-            'point_cloud_range': point_cloud_range,
-            'voxel_size': (0.1, 0.1, 5.0),
-            'max_points_per_voxel': 32,
-            'max_num_voxels': 60000,
-            'backbone_out_channels': 256,
-        }
-        if lidar_config:
-            default_lidar_config.update(lidar_config)
-        
-        self.lidar_encoder = MarineLiDARBEVEncoder(**default_lidar_config)
-        lidar_bev_channels = default_lidar_config['backbone_out_channels']
-        
-        # Fusion (400x400)
+        # Fusion
         self.fusion = BEVFusion(
-            camera_channels=camera_bev_channels,
-            lidar_channels=lidar_bev_channels,
+            camera_channels=camera_config.get('feat_channels', 256),
+            lidar_channels=lidar_config['backbone_out_channels'],
             out_channels=fused_channels,
             fusion_method=fusion_method,
             target_shape=bev_size,
         )
         
-        # Segmentation Head (3 classes)
+        # Head
         self.seg_head = MarineDebrisSegHead(
             in_channels=fused_channels,
             num_classes=num_classes,
             hidden_channels=fused_channels,
-            use_instance_head=True,
-            use_boundary_head=True,
+            use_instance_head=use_instance_head,
+            use_boundary_head=use_boundary_head,
+            output_stride=output_stride
         )
+
+    def forward(self, images, points, batch_size):
+        # Camera Branch
+        camera_outputs = self.camera_encoder(images)
+        camera_bev = camera_outputs['bev_features']
         
-    def forward(
-        self,
-        images: Optional[torch.Tensor] = None,
-        camera_intrinsics: Optional[torch.Tensor] = None,
-        camera_extrinsics: Optional[torch.Tensor] = None,
-        camera_bev: Optional[torch.Tensor] = None,
-        points: torch.Tensor = None,
-        batch_size: int = 1,
-    ) -> Dict[str, torch.Tensor]:
-        """End-to-end forward"""
-        if camera_bev is None:
-            if self.camera_encoder is not None and images is not None:
-                camera_bev = self.camera_encoder(
-                    images, camera_intrinsics, camera_extrinsics
-                )
-            else:
-                raise ValueError("Either camera_bev or (camera_encoder + images) must be provided")
-        
+        # LiDAR Branch
         lidar_bev = self.lidar_encoder(points, batch_size)
+        
+        # Fusion
         fused_bev = self.fusion(camera_bev, lidar_bev)
+        
+        # Segmentation
         outputs = self.seg_head(fused_bev)
         
+        if self.training:
+            outputs['depth_probs'] = camera_outputs['depth_probs']
+            
         return outputs
-
-
-class LiDAROnlyNetwork(nn.Module):
-    """LiDAR만 사용하는 네트워크 (400x400, 3 classes, 0.1m resolution)"""
-    def __init__(
-        self,
-        lidar_config: Optional[Dict] = None,
-        num_classes: int = 3,
-        bev_size: Tuple[int, int] = (400, 400),
-        point_cloud_range: List[float] = [-20.0, -20.0, -2.0, 20.0, 20.0, 3.0],
-    ):
-        super().__init__()
-        
-        default_lidar_config = {
-            'point_cloud_range': point_cloud_range,
-            'voxel_size': (0.1, 0.1, 5.0),
-            'max_points_per_voxel': 32,
-            'max_num_voxels': 60000,
-            'backbone_out_channels': 256,
-        }
-        if lidar_config:
-            default_lidar_config.update(lidar_config)
-        
-        self.lidar_encoder = MarineLiDARBEVEncoder(**default_lidar_config)
-        
-        self.seg_head = MarineDebrisSegHead(
-            in_channels=default_lidar_config['backbone_out_channels'],
-            num_classes=num_classes,
-            hidden_channels=256,
-        )
-        
-    def forward(self, points: torch.Tensor, batch_size: int) -> Dict[str, torch.Tensor]:
-        lidar_bev = self.lidar_encoder(points, batch_size)
-        outputs = self.seg_head(lidar_bev)
-        outputs['lidar_bev'] = lidar_bev
-        return outputs
-
-
-class CameraOnlyNetwork(nn.Module):
-    """Camera만 사용하는 네트워크 (400x400, 3 classes)"""
-    def __init__(
-        self,
-        camera_bev_channels: int = 256,
-        num_classes: int = 3,
-    ):
-        super().__init__()
-        
-        self.seg_head = MarineDebrisSegHead(
-            in_channels=camera_bev_channels,
-            num_classes=num_classes,
-            hidden_channels=256,
-        )
-        
-    def forward(self, camera_bev: torch.Tensor) -> Dict[str, torch.Tensor]:
-        outputs = self.seg_head(camera_bev)
-        outputs['camera_bev'] = camera_bev
-        return outputs
-
 
 def build_network(config: Dict) -> nn.Module:
-    """Config로부터 네트워크 빌드 (400x400, 3 classes, 0.1m resolution)"""
-    network_type = config.get('type', 'fusion')
+    """Config -> Model 빌더"""
     
-    if network_type == 'fusion':
-        return BEVFusionNetwork(
-            camera_bev_channels=config.get('camera_bev_channels', 256),
-            lidar_bev_channels=config.get('lidar_bev_channels', 256),
-            fusion_method=config.get('fusion_method', 'adaptive'),
-            fused_channels=config.get('fused_channels', 256),
-            num_classes=config.get('num_classes', 3),
-            bev_size=tuple(config.get('bev_size', [400, 400])),
-            point_cloud_range=config.get('point_cloud_range', [-20.0, -20.0, -2.0, 20.0, 20.0, 3.0]),
-            voxel_size=tuple(config.get('voxel_size', [0.1, 0.1, 5.0])),
-        )
-    elif network_type == 'lidar_only':
-        return LiDAROnlyNetwork(
-            num_classes=config.get('num_classes', 3),
-            bev_size=tuple(config.get('bev_size', [400, 400])),
-            point_cloud_range=config.get('point_cloud_range', [-20.0, -20.0, -2.0, 20.0, 20.0, 3.0]),
-        )
-    elif network_type == 'camera_only':
-        return CameraOnlyNetwork(
-            camera_bev_channels=config.get('camera_bev_channels', 256),
-            num_classes=config.get('num_classes', 3),
-        )
+    if 'model' in config:
+        model_cfg = config['model']
     else:
-        raise ValueError(f"Unknown network type: {network_type}")
+        model_cfg = config
+
+    # 카메라 사용 여부 확인
+    use_camera = config.get('camera', {}).get('use_camera', False) or \
+                 model_cfg.get('camera', {}).get('use_camera', False) or \
+                 'camera_bev_config' in config
+
+    # 공통 설정
+    output_stride = model_cfg.get('output_stride', 1)
+    bev_size = tuple(model_cfg.get('bev_size', [200, 200]))
+    point_cloud_range = model_cfg['point_cloud_range']
+    voxel_size = tuple(model_cfg['voxel_size'])
+    
+    # LiDAR Config
+    lidar_cfg = {
+        'point_cloud_range': point_cloud_range,
+        'voxel_size': voxel_size,
+        'max_points_per_voxel': model_cfg.get('max_points_per_voxel', 32),
+        'max_num_voxels': model_cfg.get('max_num_voxels', 25000),
+        'backbone_out_channels': model_cfg.get('lidar_bev_channels', 256),
+    }
+
+    if use_camera:
+        print("[Build Network] Building Full BEV Fusion Network (Camera + LiDAR)")
+        
+        # [수정] numpy array로 변환하여 설정 전달
+        camera_cfg = {
+            # Backbone & Structure
+            'backbone': 'convnext_tiny',
+            'pretrained': True,
+            'feat_channels': model_cfg.get('camera_bev_channels', 256),
+            'use_fpn': True,
+            'feature_stride': 4,
+            
+            # Geometry
+            'img_size': (368, 640),
+            'bev_size': bev_size,
+            'bev_range': point_cloud_range[:4],
+            
+            # Depth & Calibration
+            'depth_bins': 112,
+            'depth_range': (1.0, 50.0),
+            # [중요] List -> np.array 변환 (dtype 명시)
+            'K_init': np.array([[278.27, 0, 320.0], [0, 278.27, 184.0], [0, 0, 1]], dtype=np.float32),
+            'T_init': np.eye(4, dtype=np.float32), 
+            'learn_intrinsic': True,
+            'learn_extrinsic': True,
+            
+            # Checkpoint
+            'depth_net_checkpoint': '/home/anhong/BEVFusion/checkpoints/depth_net/best_depth_net.pth'
+        }
+        
+        model = FullBEVFusionNetwork(
+            camera_config=camera_cfg,
+            lidar_config=lidar_cfg,
+            fusion_method=model_cfg.get('fusion_method', 'adaptive'),
+            fused_channels=model_cfg.get('fused_channels', 256),
+            num_classes=model_cfg.get('num_classes', 3),
+            use_instance_head=model_cfg.get('use_instance_head', False),
+            use_boundary_head=model_cfg.get('use_boundary_head', True),
+            output_stride=output_stride,
+            bev_size=bev_size
+        )
+        
+        ckpt_path = camera_cfg['depth_net_checkpoint']
+        if os.path.exists(ckpt_path):
+            print(f"Loading DepthNet weights from {ckpt_path}")
+            # 모듈 내부 로직이 없다면 여기서 로드 (현재 사용자 모듈은 내부 로드 로직이 없어보여 추가하면 좋음)
+            # 일단은 넘어가고, 필요하면 가중치 로드 코드 추가
+            try:
+                # CameraBEVModule 구조상 depth_net이 내부에 있음
+                state_dict = torch.load(ckpt_path, map_location='cpu')
+                model.camera_encoder.depth_net.load_state_dict(state_dict['model_state_dict'] if 'model_state_dict' in state_dict else state_dict, strict=False)
+                print("✓ Pre-trained DepthNet weights loaded manually.")
+            except:
+                print("Warning: Failed to load DepthNet weights automatically.")
+
+        return model
+
+    else:
+        print("[Build Network] Building Standard BEV Fusion Network (LiDAR input / Ext Camera Feature)")
+        return BEVFusionNetwork(
+            camera_bev_channels=model_cfg.get('camera_bev_channels', 256),
+            lidar_bev_channels=model_cfg.get('lidar_bev_channels', 256),
+            fusion_method=model_cfg.get('fusion_method', 'adaptive'),
+            fused_channels=model_cfg.get('fused_channels', 256),
+            num_classes=model_cfg.get('num_classes', 3),
+            bev_size=bev_size,
+            point_cloud_range=point_cloud_range,
+            voxel_size=voxel_size,
+            output_stride=output_stride,
+        )

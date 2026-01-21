@@ -13,12 +13,9 @@ class CameraBackbone(nn.Module):
     """
     
     SUPPORTED_BACKBONES = {
-        # ConvNeXt 시리즈
         'convnext_tiny': 'convnext_tiny',
         'convnext_small': 'convnext_small',
         'convnext_base': 'convnext_base',
-        
-        # 다른 옵션들 (참고용)
         'efficientnetv2_s': 'tf_efficientnetv2_s',
         'efficientnetv2_m': 'tf_efficientnetv2_m',
         'resnet50': 'resnet50',
@@ -228,8 +225,8 @@ if __name__ == '__main__':
     
     # ConvNeXt 시리즈 테스트
     test_models = [
-        'convnext_tiny',   # 추천! ⭐⭐⭐
-        'convnext_small',  # 더 높은 정확도
+        'convnext_tiny',
+        'convnext_small',
     ]
     
     img_size = (384, 640)  # 임의 크기
