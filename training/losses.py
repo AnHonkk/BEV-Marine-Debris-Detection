@@ -1,10 +1,22 @@
+"""
+Loss Functions for BEV Fusion Network
+해양 부유쓰레기 탐지를 위한 손실 함수
+
+Classes (3):
+- 0: Background (배경/수면)
+- 1: Land (육지/부두/구조물)
+- 2: Debris (부유쓰레기)
+"""
+
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+
 class FocalLoss(nn.Module):
     """
     Focal Loss for addressing class imbalance
+    특히 Debris 클래스가 희귀할 때 유용
     """
     def __init__(self, alpha=None, gamma=2.0, reduction='mean', ignore_index=-100):
         super().__init__()
@@ -41,6 +53,7 @@ class FocalLoss(nn.Module):
 class DiceLoss(nn.Module):
     """
     Dice Loss for segmentation
+    클래스별 IoU 최적화에 효과적
     """
     def __init__(self, smooth=1.0, ignore_index=-100):
         super().__init__()
@@ -55,12 +68,9 @@ class DiceLoss(nn.Module):
         # targets: (B, H, W) labels -> One-hot encoding
         # ignore_index 처리: 유효한 영역만 마스킹
         valid_mask = (targets != self.ignore_index)
-        targets = targets * valid_mask.long() # ignore 인덱스를 0으로 임시 변환
+        targets = targets * valid_mask.long()
         
         targets_one_hot = F.one_hot(targets, num_classes).permute(0, 3, 1, 2).float()
-        
-        # ignore_index였던 픽셀은 마스크를 이용해 계산에서 제외하거나 0으로 처리
-        # 간단한 구현을 위해 여기서는 전체 계산 후 평균
         
         intersection = (inputs * targets_one_hot).sum(dim=(2, 3))
         union = inputs.sum(dim=(2, 3)) + targets_one_hot.sum(dim=(2, 3))
@@ -74,6 +84,7 @@ class DiceLoss(nn.Module):
 class BoundaryLoss(nn.Module):
     """
     Binary Cross Entropy Loss for boundary detection
+    쓰레기 경계선 검출에 사용
     """
     def __init__(self, pos_weight=None):
         super().__init__()
@@ -87,22 +98,41 @@ class MultiTaskLoss(nn.Module):
     """
     Multi-task loss for Marine Debris Detection
     Combines Semantic (Focal + Dice), Boundary, and Instance losses
+    
+    Classes:
+    - 0: Background
+    - 1: Land  
+    - 2: Debris
     """
-    def __init__(self, num_classes=6, class_weights=None, 
-                 semantic_weight=1.0, dice_weight=1.0, boundary_weight=0.5,
-                 center_weight=1.0, offset_weight=0.2, size_weight=0.1,
-                 use_instance_loss=False, focal_gamma=2.0, ignore_index=-100):
+    def __init__(
+        self, 
+        num_classes=3,
+        class_weights=None, 
+        semantic_weight=1.0, 
+        dice_weight=1.0, 
+        boundary_weight=0.5,
+        center_weight=1.0, 
+        offset_weight=0.2, 
+        size_weight=0.1,
+        use_instance_loss=False, 
+        focal_gamma=2.0, 
+        ignore_index=-100
+    ):
         super().__init__()
         
+        # Default class weights: [Background, Land, Debris]
+        # Debris에 높은 가중치 부여 (희귀 클래스)
+        if class_weights is None:
+            class_weights = [0.5, 1.0, 3.0]
+            
         if class_weights is not None:
             if not isinstance(class_weights, torch.Tensor):
                 class_weights = torch.tensor(class_weights)
-            # device는 forward 시 처리되도록 init에서는 to(device) 하지 않음 (또는 모델 device 따름)
             
         self.focal_loss = FocalLoss(alpha=class_weights, gamma=focal_gamma, ignore_index=ignore_index)
         self.dice_loss = DiceLoss(ignore_index=ignore_index)
         self.boundary_loss = BoundaryLoss()
-        self.reg_loss = nn.L1Loss() # For regression (center, offset, size)
+        self.reg_loss = nn.L1Loss()
         
         self.semantic_weight = semantic_weight
         self.dice_weight = dice_weight
@@ -111,6 +141,8 @@ class MultiTaskLoss(nn.Module):
         self.offset_weight = offset_weight
         self.size_weight = size_weight
         self.use_instance_loss = use_instance_loss
+        
+        self.num_classes = num_classes
 
     def forward(self, outputs, targets):
         """
@@ -123,7 +155,7 @@ class MultiTaskLoss(nn.Module):
         
         # 1. Semantic Loss (Focal + Dice)
         if 'semantic' in outputs and 'semantic' in targets:
-            # device 맞춰주기 (class_weights가 있다면)
+            # device 맞춰주기
             if self.focal_loss.alpha is not None:
                 self.focal_loss.alpha = self.focal_loss.alpha.to(outputs['semantic'].device)
 
@@ -142,7 +174,7 @@ class MultiTaskLoss(nn.Module):
             pred_boundary = outputs['boundary']
             target_boundary = targets['boundary']
             
-            # 차원 맞추기: target이 (B, H, W)면 (B, 1, H, W)로
+            # 차원 맞추기
             if target_boundary.dim() == 3:
                 target_boundary = target_boundary.unsqueeze(1)
                 
@@ -152,19 +184,16 @@ class MultiTaskLoss(nn.Module):
             
         # 3. Instance Losses (Optional)
         if self.use_instance_loss:
-            # Center (Heatmap) Loss
             if 'center' in outputs and 'center' in targets:
                 c_loss = self.reg_loss(outputs['center'], targets['center'])
                 losses['center'] = c_loss
                 total_loss += self.center_weight * c_loss
             
-            # Offset Loss
             if 'offset' in outputs and 'offset' in targets:
                 o_loss = self.reg_loss(outputs['offset'], targets['offset'])
                 losses['offset'] = o_loss
                 total_loss += self.offset_weight * o_loss
                 
-            # Size Loss
             if 'size' in outputs and 'size' in targets:
                 s_loss = self.reg_loss(outputs['size'], targets['size'])
                 losses['size'] = s_loss
