@@ -2,13 +2,10 @@
 BEV Segmentation Head
 Fused BEV Feature Map을 BEV Segmentation Map으로 변환
 
-해양 부유쓰레기 탐지를 위한 클래스:
-- Background (배경/수면)
-- Plastic (플라스틱 쓰레기)
-- Wood (나무/목재)
-- Foam (스티로폼)
-- Rope (로프/그물)
-- Other (기타 쓰레기)
+해양 부유쓰레기 탐지를 위한 클래스 (3개):
+- 0: Background (배경/수면)
+- 1: Land (육지/부두/구조물)
+- 2: Debris (부유쓰레기)
 """
 
 import torch
@@ -178,7 +175,7 @@ class BEVSegmentationHead(nn.Module):
     def __init__(
         self,
         in_channels: int = 256,
-        num_classes: int = 6,  # Background, Plastic, Wood, Foam, Rope, Other
+        num_classes: int = 3,  # Background, Land, Debris
         hidden_channels: int = 256,
         use_aspp: bool = True,
         dropout: float = 0.1,
@@ -230,7 +227,7 @@ class UNetSegmentationHead(nn.Module):
         self,
         in_channels: int = 256,
         skip_channels: List[int] = [128, 64],  # Skip connection channels
-        num_classes: int = 6,
+        num_classes: int = 3,
         hidden_channels: int = 256,
     ):
         super().__init__()
@@ -298,7 +295,7 @@ class DeepLabV3PlusHead(nn.Module):
         self,
         in_channels: int = 256,
         low_level_channels: int = 64,
-        num_classes: int = 6,
+        num_classes: int = 3,
         aspp_out_channels: int = 256,
         decoder_channels: int = 256,
     ):
@@ -371,7 +368,7 @@ class InstanceAwareBEVHead(nn.Module):
     def __init__(
         self,
         in_channels: int = 256,
-        num_classes: int = 6,
+        num_classes: int = 3,
         hidden_channels: int = 256,
         use_aspp: bool = True,
     ):
@@ -440,21 +437,19 @@ class MarineDebrisSegHead(nn.Module):
     """
     해양 부유쓰레기 탐지를 위한 특화된 Segmentation Head
     
-    클래스:
+    클래스 (3개):
     0: Background (배경/수면)
-    1: Plastic (플라스틱)
-    2: Wood (나무/목재)
-    3: Styrofoam (스티로폼)
-    4: Rope/Net (로프/그물)
-    5: Other (기타)
+    1: Land (육지/부두/구조물)
+    2: Debris (부유쓰레기)
     """
     
-    CLASSES = ['Background', 'Plastic', 'Wood', 'Styrofoam', 'Rope/Net', 'Other']
+    CLASSES = ['Background', 'Land', 'Debris']
+    NUM_CLASSES = 3
     
     def __init__(
         self,
         in_channels: int = 256,
-        num_classes: int = 6,
+        num_classes: int = 3,
         hidden_channels: int = 256,
         output_stride: int = 1,  # Output resolution relative to input
         use_instance_head: bool = False,
@@ -574,3 +569,14 @@ class MarineDebrisSegHead(nn.Module):
     @staticmethod
     def get_class_name(class_idx: int) -> str:
         return MarineDebrisSegHead.CLASSES[class_idx]
+    
+    @staticmethod
+    def get_class_colors() -> Dict[int, Tuple[int, int, int]]:
+        """
+        Get RGB colors for each class (for visualization)
+        """
+        return {
+            0: (0, 0, 255),      # Background - Blue (water)
+            1: (0, 255, 0),      # Land - Green
+            2: (255, 0, 0),      # Debris - Red
+        }

@@ -7,32 +7,39 @@ model:
   
   # Camera BEV settings
   camera_bev_channels: 256
-  camera_bev_size: [200, 200]
+  camera_bev_size: [400, 400]
   
   # LiDAR BEV settings
   lidar_bev_channels: 256
-  point_cloud_range: [-30.0, -30.0, -2.0, 30.0, 30.0, 3.0]
-  voxel_size: [0.3, 0.3, 5.0]
+  point_cloud_range: [-20.0, -20.0, -2.0, 20.0, 20.0, 3.0]  # 40m x 40m
+  voxel_size: [0.1, 0.1, 5.0]  # 40m / 400 = 0.1m per pixel
   max_points_per_voxel: 32
-  max_num_voxels: 40000
+  max_num_voxels: 50000
   
   # Fusion settings
   fusion_method: 'adaptive'  # 'conv', 'channel_attn', 'spatial_attn', 'cross_attn', 'adaptive'
   fused_channels: 256
   
-  # Segmentation settings
-  num_classes: 6
+  # Segmentation settings (3 classes)
+  num_classes: 3  # 0: Background, 1: Land, 2: Debris
   use_instance_head: false
   use_boundary_head: true
   
-  # Final BEV size
-  bev_size: [200, 200]
+  # Final BEV size (400x400)
+  bev_size: [400, 400]
+
+# Class definition
+classes:
+  0: 'Background'  # 배경/수면
+  1: 'Land'        # 육지/부두/구조물
+  2: 'Debris'      # 부유쓰레기
 
 # Loss configuration
 loss:
   # Class weights for imbalanced data
-  # [Background, Plastic, Wood, Styrofoam, Rope/Net, Other]
-  class_weights: [0.5, 2.0, 1.5, 2.0, 1.5, 1.0]
+  # [Background, Land, Debris]
+  # Debris에 높은 가중치 (희귀 클래스)
+  class_weights: [0.5, 1.0, 3.0]
   
   # Loss weights
   semantic_weight: 1.0
@@ -62,7 +69,7 @@ scheduler:
 
 # Training settings
 num_epochs: 100
-batch_size: 4
+batch_size: 2  # 400x400 BEV는 메모리 사용량이 많아 배치 크기 줄임
 num_workers: 4
 max_grad_norm: 1.0
 
@@ -78,11 +85,40 @@ data:
   val_path: './data/val'
   test_path: './data/test'
   
+  # Image size
+  img_size: [368, 640]  # H, W
+  
   # Augmentation
   augmentation:
     random_flip: true
     random_rotate: true
     random_scale: [0.9, 1.1]
+
+# Calibration settings
+calibration:
+  # Camera intrinsic
+  camera:
+    width: 640
+    height: 368
+    fx: 278.270488
+    fy: 278.270488
+    cx: 320.0
+    cy: 184.0
+    distortion: [-0.333915, 0.214450, -0.011128, 0.001014, 0.0]
+  
+  # LiDAR to Camera transform
+  T_lidar2cam:
+    - [0.0015, 0.9993, -0.0366, 0.0000]
+    - [0.0941, -0.0366, -0.9949, 0.2200]
+    - [-0.9956, -0.0020, -0.0941, 0.1600]
+    - [0.0000, 0.0000, 0.0000, 1.0000]
+
+# BEV settings (400x400, 0.1m resolution)
+bev:
+  x_range: [-20.0, 20.0]  # meters (40m total)
+  y_range: [-20.0, 20.0]  # meters (40m total)
+  resolution: 0.1         # meters per pixel (40m / 400 = 0.1m)
+  size: [400, 400]        # pixels
 
 # Hardware settings
 device: 'cuda'
